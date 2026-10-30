@@ -1,0 +1,8 @@
+{
+  "name": "SIBIKOM V.10.B",
+  "description": "Sibikom V.10.B-Portal",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
