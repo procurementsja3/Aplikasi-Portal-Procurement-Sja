@@ -2092,16 +2092,72 @@
           );
         };
 
+        const INPUT_PENAWARAN_DRAFT_KEY = 'sja_input_penawaran_draft_v1';
+        const EDIT_PENAWARAN_DRAFT_KEY = 'sja_edit_penawaran_draft_v1';
+
+        const readPenawaranDraft = (storageKey) => {
+          try {
+            const raw = localStorage.getItem(storageKey);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            return (parsed && typeof parsed === 'object') ? parsed : null;
+          } catch (e) {
+            return null;
+          }
+        };
+
+        const writePenawaranDraft = (storageKey, payload) => {
+          try {
+            localStorage.setItem(storageKey, JSON.stringify(payload));
+          } catch (e) {}
+        };
+
+        const clearPenawaranDraft = (storageKey) => {
+          try {
+            localStorage.removeItem(storageKey);
+          } catch (e) {}
+        };
+
+        const generateNextReqNumber = (allData) => {
+          const dateObj = new Date();
+          const prefix = `REQ/${dateObj.getFullYear()}/${String(dateObj.getMonth() + 1).padStart(2, '0')}/`;
+          let maxSequence = 0;
+          (allData || []).forEach(item => {
+            if (item && item.reqNumber && String(item.reqNumber).startsWith(prefix)) {
+              const seqNum = parseInt(String(item.reqNumber).replace(prefix, ''), 10);
+              if (!isNaN(seqNum) && seqNum > maxSequence) maxSequence = seqNum;
+            }
+          });
+          return `${prefix}${String(maxSequence + 1).padStart(3, '0')}`;
+        };
+
         const InputDataView = ({ onAddData, isSaving, data, editData, onCancelEdit, userRole }) => {
-          const [reqNumber, setReqNumber] = useState('');
-          const [projectName, setProjectName] = useState('');
-          const [poList, setPoList] = useState([]);
-          const [poInput, setPoInput] = useState('');
-          const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-          const [supplierInput, setSupplierInput] = useState('');
-          const [suppliers, setSuppliers] = useState([]);
-          const [supplierTerms, setSupplierTerms] = useState({});
-          const [items, setItems] = useState([{ id: 1, description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+          const isEditMode = Array.isArray(editData) && editData.length > 0;
+          const editSignature = isEditMode ? editData.map(item => String(item?.id ?? '')).join('|') : '';
+          const todayIso = useMemo(() => new Date().toISOString().split('T')[0], []);
+
+          const initialDraft = useMemo(() => {
+            if (isEditMode) {
+              const savedEdit = readPenawaranDraft(EDIT_PENAWARAN_DRAFT_KEY);
+              if (savedEdit && savedEdit.editSignature === editSignature) return savedEdit;
+              return null;
+            }
+            return readPenawaranDraft(INPUT_PENAWARAN_DRAFT_KEY);
+          }, []);
+
+          const [reqNumber, setReqNumber] = useState(() => initialDraft?.reqNumber ?? '');
+          const [projectName, setProjectName] = useState(() => initialDraft?.projectName ?? '');
+          const [poList, setPoList] = useState(() => Array.isArray(initialDraft?.poList) ? initialDraft.poList : []);
+          const [poInput, setPoInput] = useState(() => initialDraft?.poInput ?? '');
+          const [date, setDate] = useState(() => initialDraft?.date || new Date().toISOString().split('T')[0]);
+          const [supplierInput, setSupplierInput] = useState(() => initialDraft?.supplierInput ?? '');
+          const [suppliers, setSuppliers] = useState(() => Array.isArray(initialDraft?.suppliers) ? initialDraft.suppliers : []);
+          const [supplierTerms, setSupplierTerms] = useState(() => (initialDraft?.supplierTerms && typeof initialDraft.supplierTerms === 'object') ? initialDraft.supplierTerms : {});
+          const [items, setItems] = useState(() => (Array.isArray(initialDraft?.items) && initialDraft.items.length > 0) ? initialDraft.items : [{ id: 1, description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+
+          const hydratedEditSigRef = useRef(initialDraft && isEditMode ? editSignature : '');
+          const prevIsEditModeRef = useRef(isEditMode);
+          const skipNextDraftSaveRef = useRef(false);
           
           const fileInputRef = useRef(null);
           const [notification, setNotification] = useState({ show: false, message: '', type: 'info' });
@@ -2114,6 +2170,31 @@
           const [showArchiveModal, setShowArchiveModal] = useState(false);
           const [archiveYear, setArchiveYear] = useState('');
 
+          const hasUnsavedDraft = useMemo(() => {
+            const hasItemInput = (items || []).some(it =>
+              (it?.description && String(it.description).trim() !== '') ||
+              (it?.qty && String(it.qty).trim() !== '1' && String(it.qty).trim() !== '') ||
+              (it?.unit && it.unit !== 'Unit') ||
+              (it?.customUnit && String(it.customUnit).trim() !== '') ||
+              (it?.prices && Object.values(it.prices).some(p => p && (
+                (p.amount && String(p.amount).trim() !== '') ||
+                (p.rate && String(p.rate).trim() !== '') ||
+                (p.note && String(p.note).trim() !== '') ||
+                (p.currency && p.currency !== 'IDR')
+              )))
+            );
+            return Boolean(
+              (projectName && projectName.trim() !== '') ||
+              (poList && poList.length > 0) ||
+              (poInput && poInput.trim() !== '') ||
+              (supplierInput && supplierInput.trim() !== '') ||
+              (suppliers && suppliers.length > 0) ||
+              (date && date !== todayIso) ||
+              (items && items.length > 1) ||
+              hasItemInput
+            );
+          }, [projectName, poList, poInput, supplierInput, suppliers, date, todayIso, items]);
+
           const archiveAvailableYears = useMemo(() => {
             const years = new Set();
             data.forEach(item => { if (item.date) years.add(item.date.substring(0, 4)); });
@@ -2125,8 +2206,45 @@
             setTimeout(() => setNotification({ show: false, message: '', type: 'info' }), 4000);
           };
 
+          const handleResetDraftForm = () => {
+            skipNextDraftSaveRef.current = true;
+            clearPenawaranDraft(INPUT_PENAWARAN_DRAFT_KEY);
+            setProjectName('');
+            setPoList([]);
+            setPoInput('');
+            setDate(new Date().toISOString().split('T')[0]);
+            setSupplierInput('');
+            setSuppliers([]);
+            setSupplierTerms({});
+            setItems([{ id: Date.now(), description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+            setReqNumber(generateNextReqNumber(data));
+            showNotification("Form berhasil dibersihkan ke kondisi awal.", "success");
+          };
+
           useEffect(() => {
-            if (editData && Array.isArray(editData) && editData.length > 0) {
+            if (isEditMode) {
+              // Jika sudah ter-hydrate dari draft edit yang sama, jangan timpa ulang
+              if (hydratedEditSigRef.current === editSignature) {
+                prevIsEditModeRef.current = true;
+                return;
+              }
+              const savedEditDraft = readPenawaranDraft(EDIT_PENAWARAN_DRAFT_KEY);
+              if (savedEditDraft && savedEditDraft.editSignature === editSignature) {
+                setReqNumber(savedEditDraft.reqNumber ?? '');
+                setProjectName(savedEditDraft.projectName ?? '');
+                setPoList(Array.isArray(savedEditDraft.poList) ? savedEditDraft.poList : []);
+                setPoInput(savedEditDraft.poInput ?? '');
+                setDate(savedEditDraft.date || new Date().toISOString().split('T')[0]);
+                setSupplierInput(savedEditDraft.supplierInput ?? '');
+                setSuppliers(Array.isArray(savedEditDraft.suppliers) ? savedEditDraft.suppliers : []);
+                setSupplierTerms((savedEditDraft.supplierTerms && typeof savedEditDraft.supplierTerms === 'object') ? savedEditDraft.supplierTerms : {});
+                setItems((Array.isArray(savedEditDraft.items) && savedEditDraft.items.length > 0) ? savedEditDraft.items : [{ id: 1, description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+                hydratedEditSigRef.current = editSignature;
+                prevIsEditModeRef.current = true;
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+                return;
+              }
+
               const first = editData[0];
               setReqNumber(first.reqNumber || ''); 
               setProjectName(first.projectName || '');
@@ -2205,23 +2323,84 @@
                 };
               });
               setItems(hydratedItems.length > 0 ? hydratedItems : [{ id: 1, description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+              hydratedEditSigRef.current = editSignature;
+              prevIsEditModeRef.current = true;
               window.scrollTo({ top: 0, behavior: 'smooth' });
+            } else if (prevIsEditModeRef.current) {
+              // Berpindah dari mode edit kembali ke mode input baru -> pulihkan draft input baru jika ada
+              hydratedEditSigRef.current = '';
+              prevIsEditModeRef.current = false;
+              const savedCreateDraft = readPenawaranDraft(INPUT_PENAWARAN_DRAFT_KEY);
+              if (savedCreateDraft) {
+                setReqNumber(savedCreateDraft.reqNumber || generateNextReqNumber(data));
+                setProjectName(savedCreateDraft.projectName ?? '');
+                setPoList(Array.isArray(savedCreateDraft.poList) ? savedCreateDraft.poList : []);
+                setPoInput(savedCreateDraft.poInput ?? '');
+                setDate(savedCreateDraft.date || new Date().toISOString().split('T')[0]);
+                setSupplierInput(savedCreateDraft.supplierInput ?? '');
+                setSuppliers(Array.isArray(savedCreateDraft.suppliers) ? savedCreateDraft.suppliers : []);
+                setSupplierTerms((savedCreateDraft.supplierTerms && typeof savedCreateDraft.supplierTerms === 'object') ? savedCreateDraft.supplierTerms : {});
+                setItems((Array.isArray(savedCreateDraft.items) && savedCreateDraft.items.length > 0) ? savedCreateDraft.items : [{ id: 1, description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+              } else {
+                setReqNumber(generateNextReqNumber(data));
+                setProjectName('');
+                setPoList([]);
+                setPoInput('');
+                setDate(new Date().toISOString().split('T')[0]);
+                setSupplierInput('');
+                setSuppliers([]);
+                setSupplierTerms({});
+                setItems([{ id: 1, description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+              }
             }
-          }, [editData]);
+          }, [editData, isEditMode, editSignature]);
+
+          // Auto-simpan draft setiap kali user mengetik agar tidak hilang saat klik menu sidebar lain atau refresh browser
+          useEffect(() => {
+            if (skipNextDraftSaveRef.current) {
+              skipNextDraftSaveRef.current = false;
+              return;
+            }
+            if (isEditMode) {
+              if (hydratedEditSigRef.current !== editSignature) return;
+              writePenawaranDraft(EDIT_PENAWARAN_DRAFT_KEY, {
+                editSignature,
+                reqNumber,
+                projectName,
+                poList,
+                poInput,
+                date,
+                supplierInput,
+                suppliers,
+                supplierTerms,
+                items,
+                savedAt: Date.now()
+              });
+            } else {
+              if (hasUnsavedDraft) {
+                writePenawaranDraft(INPUT_PENAWARAN_DRAFT_KEY, {
+                  reqNumber,
+                  projectName,
+                  poList,
+                  poInput,
+                  date,
+                  supplierInput,
+                  suppliers,
+                  supplierTerms,
+                  items,
+                  savedAt: Date.now()
+                });
+              } else {
+                clearPenawaranDraft(INPUT_PENAWARAN_DRAFT_KEY);
+              }
+            }
+          }, [reqNumber, projectName, poList, poInput, date, supplierInput, suppliers, supplierTerms, items, isEditMode, editSignature, hasUnsavedDraft]);
 
           useEffect(() => {
-             if (!editData && !reqNumber) {
-                const dateObj = new Date(); const prefix = `REQ/${dateObj.getFullYear()}/${String(dateObj.getMonth() + 1).padStart(2, '0')}/`;
-                let maxSequence = 0; 
-                (data || []).forEach(item => { 
-                    if (item && item.reqNumber && item.reqNumber.startsWith(prefix)) { 
-                        const seqNum = parseInt(item.reqNumber.replace(prefix, ''), 10); 
-                        if (!isNaN(seqNum) && seqNum > maxSequence) maxSequence = seqNum; 
-                    } 
-                });
-                setReqNumber(`${prefix}${String(maxSequence + 1).padStart(3, '0')}`);
+             if (!isEditMode && !reqNumber) {
+                setReqNumber(generateNextReqNumber(data));
              }
-          }, []);
+          }, [isEditMode, data]);
 
           const handleBackup = () => {
               if (!data || data.length === 0) return showNotification("Tidak ada data untuk dibackup.", "error");
@@ -2383,13 +2562,17 @@
             onAddData(newFormattedData, (editData && editData.length > 0) ? editData.map(item => item.id) : []);
             showNotification(`Berhasil! Data telah ${(editData && editData.length > 0) ? 'diperbarui' : 'ditambahkan'}.`, 'success');
             
+            skipNextDraftSaveRef.current = true;
             if (!editData || editData.length === 0) {
-                setProjectName(''); setPoList([]); setPoInput(''); setDate(new Date().toISOString().split('T')[0]); setSuppliers([]); setSupplierTerms({}); setItems([{ id: Date.now(), description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
+                clearPenawaranDraft(INPUT_PENAWARAN_DRAFT_KEY);
+                setProjectName(''); setPoList([]); setPoInput(''); setDate(new Date().toISOString().split('T')[0]); setSupplierInput(''); setSuppliers([]); setSupplierTerms({}); setItems([{ id: Date.now(), description: '', qty: '1', unit: 'Unit', customUnit: '', prices: {} }]);
                 const parts = finalReqNumber.split('/');
                 if (parts.length === 4) {
                     const nextSeq = parseInt(parts[3], 10) + 1;
                     setReqNumber(`${parts[0]}/${parts[1]}/${parts[2]}/${String(nextSeq).padStart(3, '0')}`);
                 }
+            } else {
+                clearPenawaranDraft(EDIT_PENAWARAN_DRAFT_KEY);
             }
           };
 
@@ -2468,12 +2651,22 @@
             <div className="max-w-6xl mx-auto space-y-6 animate-in slide-in-from-bottom-4 duration-300">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-white p-5 rounded-2xl shadow-[0_2px_12px_-4px_rgba(0,0,0,0.04)] border border-slate-200/60 gap-4">
                 <div>
-                  <h1 className="text-2xl font-bold text-slate-800 tracking-tight">{editData ? 'Edit Data Penawaran' : 'Input Penawaran'}</h1>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <h1 className="text-2xl font-bold text-slate-800 tracking-tight">{editData ? 'Edit Data Penawaran' : 'Input Penawaran'}</h1>
+                    {(!editData && hasUnsavedDraft) && (
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-[11px] font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                        Draft tersimpan otomatis
+                      </span>
+                    )}
+                  </div>
                   <p className="text-sm text-slate-500 font-medium mt-0.5">{editData ? 'Perbarui data rincian item, harga, dan supplier.' : 'Tambahkan item dan komparasi supplier secara massal.'}</p>
                 </div>
                 <div className="flex flex-wrap gap-2 w-full md:w-auto">
                   {!editData ? (
                      <>
+                        {hasUnsavedDraft && (
+                          <button onClick={handleResetDraftForm} type="button" className="px-4 py-2 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg hover:bg-rose-100 transition-colors font-bold text-sm flex items-center cursor-pointer"><RefreshCw className="w-4 h-4 mr-2" /> Reset Form</button>
+                        )}
                         {userRole === 'admin' && (
                           <button onClick={() => setShowArchiveModal(true)} type="button" className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200 transition-colors font-bold text-sm flex items-center"><Archive className="w-4 h-4 mr-2" /> Tutup Tahun</button>
                         )}
@@ -2481,7 +2674,7 @@
                         <button onClick={() => fileInputRef.current?.click()} type="button" className="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-blue-600 transition-colors shadow-sm font-bold text-sm flex items-center"><Upload className="w-4 h-4 mr-2" /> Restore</button>
                      </>
                   ) : (
-                      <button onClick={onCancelEdit} type="button" className="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-rose-600 transition-colors shadow-sm font-bold text-sm flex items-center"><X className="w-4 h-4 mr-2" /> Batal Edit</button>
+                      <button onClick={() => { clearPenawaranDraft(EDIT_PENAWARAN_DRAFT_KEY); onCancelEdit(); }} type="button" className="px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-rose-600 transition-colors shadow-sm font-bold text-sm flex items-center cursor-pointer"><X className="w-4 h-4 mr-2" /> Batal Edit</button>
                   )}
                   <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept=".json" />
                 </div>
@@ -4503,13 +4696,222 @@
           );
         };
 
+        // --- HELPER PENYIMPANAN DOKUMEN AMAN (INDEXEDDB + FIRESTORE CHUNKING) ---
+        const SJA_DOC_DB_NAME = 'sja_procurement_docs_cache_v1';
+        const SJA_DOC_STORE_NAME = 'doc_lists';
+        const FIRESTORE_SAFE_CHUNK_LEN = 650000; // Aman di bawah batas 1 MiB Firestore
+
+        const openDocCacheDB = () => new Promise((resolve, reject) => {
+          try {
+            if (typeof indexedDB === 'undefined') return reject(new Error('IndexedDB unavailable'));
+            const req = indexedDB.open(SJA_DOC_DB_NAME, 1);
+            req.onupgradeneeded = () => {
+              const idb = req.result;
+              if (!idb.objectStoreNames.contains(SJA_DOC_STORE_NAME)) {
+                idb.createObjectStore(SJA_DOC_STORE_NAME);
+              }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          } catch (err) {
+            reject(err);
+          }
+        });
+
+        const sjaDocCache = {
+          async get(key) {
+            try {
+              const idb = await openDocCacheDB();
+              return await new Promise((resolve) => {
+                const tx = idb.transaction(SJA_DOC_STORE_NAME, 'readonly');
+                const store = tx.objectStore(SJA_DOC_STORE_NAME);
+                const req = store.get(key);
+                req.onsuccess = () => resolve(Array.isArray(req.result) ? req.result : null);
+                req.onerror = () => resolve(null);
+              });
+            } catch (e) {
+              return null;
+            }
+          },
+          async set(key, value) {
+            try {
+              const idb = await openDocCacheDB();
+              await new Promise((resolve) => {
+                const tx = idb.transaction(SJA_DOC_STORE_NAME, 'readwrite');
+                const store = tx.objectStore(SJA_DOC_STORE_NAME);
+                store.put(value, key);
+                tx.oncomplete = () => resolve(true);
+                tx.onerror = () => resolve(false);
+              });
+            } catch (e) {
+              // Abaikan error cache lokal agar tidak mengganggu aplikasi
+            }
+          }
+        };
+
+        const cleanupLegacyDocLocalStorage = () => {
+          try {
+            ['sja_docs_sop', 'sja_docs_form', 'sja_docs_seleksi', 'sja_docs_evaluasi', 'sja_all_docs'].forEach(k => {
+              try { localStorage.removeItem(k); } catch (e) {}
+            });
+          } catch (e) {}
+        };
+
+        const readFileAsDataURLAsync = (file) => new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error('Gagal membaca file dari perangkat.'));
+          reader.onabort = () => reject(new Error('Pembacaan file dibatalkan.'));
+          reader.readAsDataURL(file);
+        });
+
+        const dataUrlToBlob = (dataUrl) => {
+          if (!dataUrl || typeof dataUrl !== 'string') return null;
+          try {
+            const parts = dataUrl.split(',');
+            if (parts.length < 2) return null;
+            const mimeMatch = parts[0].match(/:(.*?);/);
+            const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+            const binary = atob(parts[1]);
+            const len = binary.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+            return new Blob([bytes], { type: mime });
+          } catch (e) {
+            return null;
+          }
+        };
+
+        const reassembleFirestoreDocuments = (rawDocs, filterDocType = null) => {
+          const safeRaw = Array.isArray(rawDocs) ? rawDocs : [];
+          const chunkMap = {};
+          const mainDocs = [];
+
+          safeRaw.forEach((item) => {
+            if (!item) return;
+            if (item.docType === '__chunk__') {
+              const pid = String(item.parentId || '');
+              if (!pid) return;
+              if (!chunkMap[pid]) chunkMap[pid] = [];
+              chunkMap[pid].push(item);
+            } else {
+              mainDocs.push(item);
+            }
+          });
+
+          const assembled = mainDocs
+            .filter(d => !filterDocType || d.docType === filterDocType)
+            .map(d => {
+              const docId = String(d.id || '');
+              if (d.isChunked && chunkMap[docId] && chunkMap[docId].length > 0) {
+                const ordered = [...chunkMap[docId]].sort((a, b) => (Number(a.chunkIndex) || 0) - (Number(b.chunkIndex) || 0));
+                return {
+                  ...d,
+                  id: docId,
+                  fileData: ordered.map(c => c.chunkData || '').join(''),
+                  _chunkIds: ordered.map(c => String(c.id))
+                };
+              }
+              return { ...d, id: docId };
+            });
+
+          assembled.sort((a, b) => (Number(b.uploadDate) || 0) - (Number(a.uploadDate) || 0));
+          return assembled;
+        };
+
+        const saveDocumentToFirestore = async (docObj) => {
+          const docId = String(docObj.id);
+          const rawFileData = typeof docObj.fileData === 'string' ? docObj.fileData : '';
+
+          if (rawFileData.length <= FIRESTORE_SAFE_CHUNK_LEN) {
+            const payload = {
+              id: docId,
+              docType: docObj.docType,
+              title: docObj.title,
+              fileName: docObj.fileName,
+              fileType: docObj.fileType || '',
+              fileSize: docObj.fileSize || 0,
+              uploadDate: docObj.uploadDate || Date.now(),
+              uploader: docObj.uploader || 'Admin SJA',
+              fileData: rawFileData,
+              isChunked: false,
+              chunkCount: 0
+            };
+            await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'documents', docId), payload);
+            return;
+          }
+
+          // Pecah base64 menjadi beberapa chunk agar aman melewati batas 1 MiB Firestore
+          const chunks = [];
+          for (let offset = 0; offset < rawFileData.length; offset += FIRESTORE_SAFE_CHUNK_LEN) {
+            chunks.push(rawFileData.slice(offset, offset + FIRESTORE_SAFE_CHUNK_LEN));
+          }
+
+          for (let i = 0; i < chunks.length; i++) {
+            const chunkId = `${docId}__chunk_${i}`;
+            await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'documents', chunkId), {
+              id: chunkId,
+              docType: '__chunk__',
+              parentId: docId,
+              chunkIndex: i,
+              chunkData: chunks[i]
+            });
+          }
+
+          const parentPayload = {
+            id: docId,
+            docType: docObj.docType,
+            title: docObj.title,
+            fileName: docObj.fileName,
+            fileType: docObj.fileType || '',
+            fileSize: docObj.fileSize || 0,
+            uploadDate: docObj.uploadDate || Date.now(),
+            uploader: docObj.uploader || 'Admin SJA',
+            fileData: '',
+            isChunked: true,
+            chunkCount: chunks.length
+          };
+          await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'documents', docId), parentPayload);
+        };
+
+        const deleteDocumentFromFirestore = async (targetDoc) => {
+          const docId = String(targetDoc?.id || targetDoc || '');
+          if (!docId) return;
+
+          const idsToDelete = new Set([docId]);
+          if (Array.isArray(targetDoc?._chunkIds)) {
+            targetDoc._chunkIds.forEach(cid => idsToDelete.add(String(cid)));
+          }
+          const count = Number(targetDoc?.chunkCount) || 0;
+          if (targetDoc?.isChunked && count > 0) {
+            for (let i = 0; i < count; i++) {
+              idsToDelete.add(`${docId}__chunk_${i}`);
+            }
+          }
+
+          const results = await Promise.allSettled(
+            Array.from(idsToDelete).map(idStr =>
+              deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'documents', idStr))
+            )
+          );
+          const firstRejected = results.find(r => r.status === 'rejected');
+          if (firstRejected) {
+            throw firstRejected.reason;
+          }
+        };
+
         const DocumentManagerView = ({ user, userRole, docType }) => {
           const [documents, setDocuments] = useState([]);
           const [isLoading, setIsLoading] = useState(true);
           const [isUploading, setIsUploading] = useState(false);
+          const [isDeletingId, setIsDeletingId] = useState(null);
+          const [deleteConfirmDoc, setDeleteConfirmDoc] = useState(null);
+          const [previewDoc, setPreviewDoc] = useState(null);
+          const [previewBlobUrl, setPreviewBlobUrl] = useState(null);
           const [titleInput, setTitleInput] = useState('');
           const [selectedFile, setSelectedFile] = useState(null);
           const fileInputRef = useRef(null);
+          const notifTimerRef = useRef(null);
           const [notification, setNotification] = useState({ show: false, message: '', type: 'info' });
           const [tableFilters, setTableFilters] = useState({ nama: '', format: '', tanggal: '' });
           const hasActiveFilters = Object.values(tableFilters).some(val => val !== '');
@@ -4521,93 +4923,262 @@
           else { pageTitle = 'Work Instruction (WI) & SOP'; pageIcon = <BookOpen className="w-5 h-5 text-blue-600" />; }
 
           useEffect(() => {
-            if (!userRole) return;
-            setIsLoading(true);
-            try {
-                const docsRef = collection(db, 'artifacts', safeAppId, 'public', 'data', 'documents');
-                const unsubscribe = onSnapshot(docsRef, (snapshot) => {
-                  const fetchedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })).filter(doc => doc.docType === docType);
-                  fetchedData.sort((a, b) => b.uploadDate - a.uploadDate); 
-                  setDocuments(fetchedData); 
-                  localStorage.setItem(`sja_docs_${docType}`, JSON.stringify(fetchedData));
-                  setIsLoading(false);
-                }, (err) => {
-                  const local = localStorage.getItem(`sja_docs_${docType}`);
-                  if (local) setDocuments(JSON.parse(local));
-                  setIsLoading(false);
-                });
-                return () => unsubscribe();
-            } catch(e) {
-                const local = localStorage.getItem(`sja_docs_${docType}`);
-                if (local) setDocuments(JSON.parse(local));
-                setIsLoading(false);
+            return () => {
+              if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
+            };
+          }, []);
+
+          useEffect(() => {
+            if (!previewDoc || !previewDoc.fileData) {
+              setPreviewBlobUrl(null);
+              return;
             }
+            const blob = dataUrlToBlob(previewDoc.fileData);
+            if (!blob) {
+              setPreviewBlobUrl(null);
+              return;
+            }
+            const url = URL.createObjectURL(blob);
+            setPreviewBlobUrl(url);
+            return () => {
+              try { URL.revokeObjectURL(url); } catch (e) {}
+            };
+          }, [previewDoc]);
+
+          useEffect(() => {
+            if (!userRole) return;
+            let isMounted = true;
+            setIsLoading(true);
+            setTableFilters({ nama: '', format: '', tanggal: '' });
+            setDeleteConfirmDoc(null);
+            setPreviewDoc(null);
+
+            const cacheKey = `sja_docs_${docType}`;
+
+            // Muat cache IndexedDB (atau fallback legacy localStorage, lalu bersihkan localStorage agar tidak QuotaExceeded)
+            (async () => {
+              try {
+                let cached = await sjaDocCache.get(cacheKey);
+                if (!cached) {
+                  try {
+                    const legacyRaw = localStorage.getItem(cacheKey);
+                    if (legacyRaw) {
+                      const parsed = JSON.parse(legacyRaw);
+                      if (Array.isArray(parsed)) {
+                        cached = parsed;
+                        await sjaDocCache.set(cacheKey, parsed);
+                      }
+                    }
+                  } catch (e) {}
+                }
+                cleanupLegacyDocLocalStorage();
+                if (isMounted && Array.isArray(cached) && cached.length > 0) {
+                  setDocuments(prev => prev.length > 0 ? prev : cached);
+                }
+              } catch (e) {}
+            })();
+
+            let unsubscribe = () => {};
+            try {
+              const docsRef = collection(db, 'artifacts', safeAppId, 'public', 'data', 'documents');
+              unsubscribe = onSnapshot(docsRef, (snapshot) => {
+                if (!isMounted) return;
+                try {
+                  const rawDocs = snapshot.docs.map(d => ({ ...d.data(), id: d.id }));
+                  const fetchedData = reassembleFirestoreDocuments(rawDocs, docType);
+                  setDocuments(fetchedData);
+                  sjaDocCache.set(cacheKey, fetchedData);
+                } catch (parseErr) {
+                  console.warn("Gagal memproses snapshot dokumen:", parseErr);
+                } finally {
+                  setIsLoading(false);
+                }
+              }, async (err) => {
+                console.warn("Firestore dokumen offline/error (menggunakan cache lokal):", err?.message || err);
+                if (!isMounted) return;
+                const cached = await sjaDocCache.get(cacheKey);
+                if (isMounted && Array.isArray(cached)) setDocuments(cached);
+                if (isMounted) setIsLoading(false);
+              });
+            } catch (e) {
+              (async () => {
+                const cached = await sjaDocCache.get(cacheKey);
+                if (isMounted && Array.isArray(cached)) setDocuments(cached);
+                if (isMounted) setIsLoading(false);
+              })();
+            }
+
+            return () => {
+              isMounted = false;
+              try { unsubscribe(); } catch (e) {}
+            };
           }, [userRole, docType]);
 
-          const showNotification = (message, type = 'success') => { setNotification({ show: true, message, type }); setTimeout(() => setNotification({ show: false, message: '', type: 'info' }), 4000); };
+          const showNotification = (message, type = 'success') => {
+            if (notifTimerRef.current) clearTimeout(notifTimerRef.current);
+            setNotification({ show: true, message, type });
+            notifTimerRef.current = setTimeout(() => setNotification({ show: false, message: '', type: 'info' }), 4500);
+          };
 
           const handleFileChange = (e) => {
-            const file = e.target.files[0]; if (!file) return;
-            if (file.size > 1048576) { showNotification("Ukuran file melebihi 1 MB.", "error"); fileInputRef.current.value = ''; setSelectedFile(null); return; }
+            const file = e.target.files?.[0];
+            if (!file) { setSelectedFile(null); return; }
+            if (file.size > 1048576) {
+              showNotification("Ukuran file melebihi batas maksimal 1 MB.", "error");
+              if (fileInputRef.current) fileInputRef.current.value = '';
+              setSelectedFile(null);
+              return;
+            }
             setSelectedFile(file);
           };
 
           const handleUpload = async (e) => {
             e.preventDefault();
             if (userRole !== 'admin') return showNotification("Akses ditolak.", "error");
-            if (!titleInput.trim() || !selectedFile) return showNotification("Isi judul & pilih file.", "error");
+            if (!titleInput.trim() || !selectedFile) return showNotification("Isi judul & pilih file terlebih dahulu.", "error");
+            if (isUploading) return;
+
             setIsUploading(true);
             try {
-              const reader = new FileReader();
-              reader.readAsDataURL(selectedFile);
-              reader.onload = async () => {
-                const newDoc = { id: Date.now().toString(), docType: docType, title: titleInput, fileName: selectedFile.name, fileType: selectedFile.type, fileSize: selectedFile.size, uploadDate: Date.now(), uploader: 'Admin SJA', fileData: reader.result };
-                
-                setDocuments(prev => {
-                    const updated = [newDoc, ...prev];
-                    localStorage.setItem(`sja_docs_${docType}`, JSON.stringify(updated));
-                    return updated;
-                });
-                
-                try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'documents', newDoc.id), newDoc); } catch(e) {}
-                showNotification("Dokumen berhasil di-upload!", "success"); setTitleInput(''); setSelectedFile(null); fileInputRef.current.value = ''; setIsUploading(false);
+              const fileDataUrl = await readFileAsDataURLAsync(selectedFile);
+              const newDoc = {
+                id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                docType: docType,
+                title: titleInput.trim(),
+                fileName: selectedFile.name,
+                fileType: selectedFile.type || 'application/octet-stream',
+                fileSize: selectedFile.size || 0,
+                uploadDate: Date.now(),
+                uploader: 'Admin SJA',
+                fileData: fileDataUrl
               };
-            } catch (error) { showNotification("Gagal upload.", "error"); setIsUploading(false); }
-          };
 
-          const handleDelete = async (docId, docTitle) => {
-            if (userRole !== 'admin') return;
-            if (window.confirm(`Hapus dokumen "${docTitle}"?`)) { 
-                setDocuments(prev => {
-                    const updated = prev.filter(d => d.id !== docId);
-                    localStorage.setItem(`sja_docs_${docType}`, JSON.stringify(updated));
-                    return updated;
-                });
-                try { await deleteDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'documents', docId)); } catch(e) {}
-                showNotification("Dokumen dihapus.", "success"); 
+              // Update state & cache IndexedDB secara aman (di luar updater React)
+              const nextDocs = [newDoc, ...documents];
+              setDocuments(nextDocs);
+              await sjaDocCache.set(`sja_docs_${docType}`, nextDocs);
+
+              let cloudSynced = true;
+              try {
+                await saveDocumentToFirestore(newDoc);
+              } catch (cloudErr) {
+                cloudSynced = false;
+                console.warn("Gagal sinkronisasi dokumen ke cloud:", cloudErr);
+              }
+
+              setTitleInput('');
+              setSelectedFile(null);
+              if (fileInputRef.current) fileInputRef.current.value = '';
+
+              if (cloudSynced) {
+                showNotification("Dokumen berhasil di-upload dan tersimpan ke cloud!", "success");
+              } else {
+                showNotification("Dokumen tersimpan di perangkat, namun gagal sinkronisasi ke cloud. Periksa koneksi internet Anda.", "error");
+              }
+            } catch (error) {
+              console.error("Upload dokumen error:", error);
+              showNotification(`Gagal upload dokumen: ${error?.message || 'Terjadi kesalahan sistem.'}`, "error");
+            } finally {
+              setIsUploading(false);
             }
           };
 
-          const filteredDocs = documents.filter(d => {
-            const dateStr = new Date(d.uploadDate).toLocaleDateString('id-ID');
-            return d.title.toLowerCase().includes(tableFilters.nama.toLowerCase()) && d.fileName.toLowerCase().includes(tableFilters.format.toLowerCase()) && (dateStr.includes(tableFilters.tanggal) || d.uploader.toLowerCase().includes(tableFilters.tanggal.toLowerCase()));
+          const handleRequestDelete = (targetDoc) => {
+            if (userRole !== 'admin' || !targetDoc) return;
+            setDeleteConfirmDoc(targetDoc);
+          };
+
+          const handleConfirmDelete = async () => {
+            if (userRole !== 'admin' || !deleteConfirmDoc) return;
+            const targetDoc = deleteConfirmDoc;
+            const docIdStr = String(targetDoc.id);
+            setIsDeletingId(docIdStr);
+            setDeleteConfirmDoc(null);
+
+            try {
+              const nextDocs = documents.filter(d => String(d.id) !== docIdStr);
+              setDocuments(nextDocs);
+              await sjaDocCache.set(`sja_docs_${docType}`, nextDocs);
+
+              try {
+                await deleteDocumentFromFirestore(targetDoc);
+                showNotification(`Dokumen "${targetDoc.title || targetDoc.fileName || ''}" berhasil dihapus.`, "success");
+              } catch (cloudErr) {
+                console.warn("Gagal menghapus dokumen di cloud:", cloudErr);
+                showNotification("Dokumen dihapus dari tampilan lokal, namun sinkronisasi hapus cloud terkendala.", "error");
+              }
+            } catch (error) {
+              console.error("Hapus dokumen error:", error);
+              showNotification("Gagal menghapus dokumen. Silakan coba lagi.", "error");
+            } finally {
+              setIsDeletingId(null);
+            }
+          };
+
+          const handleDownloadDoc = (docItem) => {
+            try {
+              if (!docItem?.fileData) {
+                return showNotification("File dokumen belum tersedia untuk diunduh.", "error");
+              }
+              const blob = dataUrlToBlob(docItem.fileData);
+              if (blob) {
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = docItem.fileName || `${docItem.title || 'dokumen'}.pdf`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e) {} }, 1500);
+              } else {
+                const link = document.createElement('a');
+                link.href = docItem.fileData;
+                link.download = docItem.fileName || `${docItem.title || 'dokumen'}`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+              }
+            } catch (err) {
+              showNotification("Gagal mengunduh file dokumen.", "error");
+            }
+          };
+
+          const filteredDocs = (Array.isArray(documents) ? documents : []).filter(d => {
+            if (!d) return false;
+            const dateStr = d.uploadDate ? new Date(d.uploadDate).toLocaleDateString('id-ID') : '';
+            const titleStr = String(d.title || '').toLowerCase();
+            const fileNameStr = String(d.fileName || '').toLowerCase();
+            const uploaderStr = String(d.uploader || '').toLowerCase();
+            const fNama = String(tableFilters.nama || '').toLowerCase();
+            const fFormat = String(tableFilters.format || '').toLowerCase();
+            const fTanggal = String(tableFilters.tanggal || '').toLowerCase();
+            return titleStr.includes(fNama) && fileNameStr.includes(fFormat) && (dateStr.toLowerCase().includes(fTanggal) || uploaderStr.includes(fTanggal));
           });
+
+          const isPreviewImage = previewDoc && (
+            String(previewDoc.fileType || '').startsWith('image/') ||
+            /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(previewDoc.fileName || ''))
+          );
+          const isPreviewPdf = previewDoc && (
+            String(previewDoc.fileType || '') === 'application/pdf' ||
+            /\.pdf$/i.test(String(previewDoc.fileName || ''))
+          );
 
           return (
             <div className="max-w-6xl mx-auto animate-in fade-in duration-300 pb-12">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4 bg-white p-5 rounded-2xl shadow-[0_2px_12px_-4px_rgba(0,0,0,0.04)] border border-slate-200/60">
                 <div className="flex items-center"><div className="p-3 bg-blue-50 rounded-xl mr-3 border border-blue-100 shadow-sm">{pageIcon}</div><div><h1 className="text-xl font-bold text-slate-800 tracking-tight">{pageTitle}</h1><p className="text-xs text-slate-500 font-medium mt-0.5">Kelola referensi. Maks 1 MB.</p></div></div>
               </div>
-              {notification.show && <div className={`mb-6 p-4 rounded-xl flex items-center shadow-sm border animate-in fade-in ${notification.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-100' : 'bg-rose-50 text-rose-800 border-rose-100'}`}><span className="font-semibold text-sm">{notification.message}</span></div>}
+              {notification.show && <div className={`mb-6 p-4 rounded-xl flex items-center justify-between shadow-sm border animate-in fade-in ${notification.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-100' : 'bg-rose-50 text-rose-800 border-rose-100'}`}><span className="font-semibold text-sm">{notification.message}</span><button type="button" onClick={() => setNotification({ show: false, message: '', type: 'info' })} className="ml-4 text-xs font-bold opacity-70 hover:opacity-100"><X className="w-4 h-4" /></button></div>}
 
               {userRole === 'admin' && (
                 <div className="bg-white rounded-2xl shadow-[0_2px_12px_-4px_rgba(0,0,0,0.04)] border border-slate-200/60 mb-6 overflow-hidden">
                   <div className="px-6 py-4 border-b border-slate-100"><h2 className="text-sm font-bold text-slate-800 flex items-center tracking-tight"><Upload className="w-4 h-4 mr-2 text-blue-600" /> Upload Dokumen Baru</h2></div>
                   <form onSubmit={handleUpload} className="p-6">
                     <div className="flex flex-col md:flex-row gap-5 items-end">
-                      <div className="flex-1 w-full"><label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Judul</label><input type="text" required value={titleInput} onChange={(e) => setTitleInput(e.target.value)} className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20 font-medium text-sm" /></div>
+                      <div className="flex-1 w-full"><label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">Judul</label><input type="text" required value={titleInput} onChange={(e) => setTitleInput(e.target.value)} placeholder="Masukkan nama dokumen / supplier..." className="w-full px-4 py-2.5 bg-slate-50/50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500/20 font-medium text-sm" /></div>
                       <div className="flex-1 w-full"><label className="block text-[11px] font-bold text-slate-500 uppercase tracking-widest mb-1.5">File</label><input type="file" required ref={fileInputRef} onChange={handleFileChange} className="w-full px-3 py-2 border border-slate-200 bg-slate-50/50 rounded-xl text-sm" /></div>
-                      <button type="submit" disabled={isUploading} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold transition-all shadow-[0_4px_12px_rgba(37,99,235,0.2)] text-sm">{isUploading ? 'Loading...' : 'Upload'}</button>
+                      <button type="submit" disabled={isUploading} className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl font-bold transition-all shadow-[0_4px_12px_rgba(37,99,235,0.2)] text-sm flex items-center justify-center min-w-[110px]">{isUploading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Proses...</> : 'Upload'}</button>
                     </div>
                   </form>
                 </div>
@@ -4622,13 +5193,21 @@
                       <tr className="bg-slate-50/50 border-t border-slate-100"><th className="px-3 py-2"><input type="text" placeholder="Cari nama..." className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-md outline-none focus:border-blue-400 font-medium shadow-sm" value={tableFilters.nama} onChange={e => setTableFilters({...tableFilters, nama: e.target.value})} /></th><th className="px-3 py-2"><input type="text" placeholder="Cari format..." className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-md outline-none focus:border-blue-400 font-medium shadow-sm" value={tableFilters.format} onChange={e => setTableFilters({...tableFilters, format: e.target.value})} /></th><th className="px-3 py-2"><input type="text" placeholder="Cari tanggal..." className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded-md outline-none focus:border-blue-400 font-medium shadow-sm" value={tableFilters.tanggal} onChange={e => setTableFilters({...tableFilters, tanggal: e.target.value})} /></th><th className="px-3 py-2"></th></tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {filteredDocs.length > 0 ? filteredDocs.map((doc) => (
-                        <tr key={doc.id} className="hover:bg-slate-50 transition-colors">
-                          <td className="px-5 py-3.5 font-bold text-slate-800">{doc.title}</td><td className="px-5 py-3.5 text-xs text-slate-600 font-medium">{doc.fileName}</td><td className="px-5 py-3.5 text-xs text-slate-500 font-medium">{new Date(doc.uploadDate).toLocaleDateString('id-ID')}</td>
+                      {isLoading && filteredDocs.length === 0 ? (
+                        <tr><td colSpan="4" className="px-6 py-8 text-center text-slate-400 font-medium text-sm"><span className="inline-flex items-center"><Loader2 className="w-4 h-4 mr-2 animate-spin text-blue-500" /> Memuat dokumen...</span></td></tr>
+                      ) : filteredDocs.length > 0 ? filteredDocs.map((docItem) => (
+                        <tr key={String(docItem.id)} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-5 py-3.5 font-bold text-slate-800">{docItem.title || '-'}</td>
+                          <td className="px-5 py-3.5 text-xs text-slate-600 font-medium">{docItem.fileName || '-'}</td>
+                          <td className="px-5 py-3.5 text-xs text-slate-500 font-medium">{docItem.uploadDate ? new Date(docItem.uploadDate).toLocaleDateString('id-ID') : '-'}</td>
                           <td className="px-5 py-3.5 flex items-center justify-center space-x-2">
-                            <a href={doc.fileData} target="_blank" rel="noopener noreferrer" className="p-1.5 text-blue-600 bg-white border border-slate-200 rounded-lg hover:bg-blue-50 shadow-sm"><Eye className="w-4 h-4" /></a>
-                            <a href={doc.fileData} download={doc.fileName} className="p-1.5 text-emerald-600 bg-white border border-slate-200 rounded-lg hover:bg-emerald-50 shadow-sm"><Download className="w-4 h-4" /></a>
-                            {userRole === 'admin' && <button onClick={() => handleDelete(doc.id, doc.title)} className="p-1.5 text-rose-500 bg-white border border-slate-200 rounded-lg hover:bg-rose-50 shadow-sm"><Trash2 className="w-4 h-4" /></button>}
+                            <button type="button" onClick={() => setPreviewDoc(docItem)} title="Lihat Dokumen" className="p-1.5 text-blue-600 bg-white border border-slate-200 rounded-lg hover:bg-blue-50 shadow-sm cursor-pointer"><Eye className="w-4 h-4" /></button>
+                            <button type="button" onClick={() => handleDownloadDoc(docItem)} title="Unduh Dokumen" className="p-1.5 text-emerald-600 bg-white border border-slate-200 rounded-lg hover:bg-emerald-50 shadow-sm cursor-pointer"><Download className="w-4 h-4" /></button>
+                            {userRole === 'admin' && (
+                              <button type="button" disabled={isDeletingId === String(docItem.id)} onClick={() => handleRequestDelete(docItem)} title="Hapus Dokumen" className="p-1.5 text-rose-500 bg-white border border-slate-200 rounded-lg hover:bg-rose-50 disabled:opacity-50 shadow-sm cursor-pointer">
+                                {isDeletingId === String(docItem.id) ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                              </button>
+                            )}
                           </td>
                         </tr>
                       )) : <tr><td colSpan="4" className="px-6 py-8 text-center text-slate-400 font-medium text-sm">Tidak ada dokumen.</td></tr>}
@@ -4636,6 +5215,56 @@
                   </table>
                 </div>
               </div>
+
+              {/* Modal Konfirmasi Hapus Dokumen */}
+              {deleteConfirmDoc && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4" onClick={() => setDeleteConfirmDoc(null)}>
+                  <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-start gap-4">
+                      <div className="p-3 rounded-xl bg-rose-50 text-rose-600 border border-rose-100 shrink-0"><Trash2 className="w-5 h-5" /></div>
+                      <div className="flex-1 min-w-0">
+                        <h3 className="text-base font-bold text-slate-800">Hapus Dokumen?</h3>
+                        <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">Anda yakin ingin menghapus dokumen <span className="font-bold text-slate-800">"{deleteConfirmDoc.title || deleteConfirmDoc.fileName}"</span>? Tindakan ini akan menghapus data dari sistem.</p>
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2.5 mt-6">
+                      <button type="button" onClick={() => setDeleteConfirmDoc(null)} className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer">Batal</button>
+                      <button type="button" onClick={handleConfirmDelete} className="px-4 py-2 text-xs font-bold text-white bg-rose-600 hover:bg-rose-700 rounded-xl shadow-sm transition-colors cursor-pointer">Ya, Hapus</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Modal Pratinjau Dokumen */}
+              {previewDoc && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 backdrop-blur-xs p-4" onClick={() => setPreviewDoc(null)}>
+                  <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-4xl w-full h-[85vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
+                    <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-bold text-slate-800 truncate">{previewDoc.title || 'Pratinjau Dokumen'}</h3>
+                        <p className="text-[11px] text-slate-500 truncate">{previewDoc.fileName || ''}</p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button type="button" onClick={() => handleDownloadDoc(previewDoc)} className="px-3 py-1.5 text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg inline-flex items-center cursor-pointer"><Download className="w-3.5 h-3.5 mr-1.5" /> Unduh</button>
+                        <button type="button" onClick={() => setPreviewDoc(null)} className="p-1.5 text-slate-500 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"><X className="w-4 h-4" /></button>
+                      </div>
+                    </div>
+                    <div className="flex-1 bg-slate-100 overflow-auto flex items-center justify-center p-2">
+                      {previewBlobUrl && isPreviewImage ? (
+                        <img src={previewBlobUrl} alt={previewDoc.title} className="max-w-full max-h-full object-contain rounded-lg shadow" />
+                      ) : previewBlobUrl && isPreviewPdf ? (
+                        <iframe src={previewBlobUrl} title={previewDoc.title} className="w-full h-full rounded-lg border-0 bg-white" />
+                      ) : (
+                        <div className="text-center p-8 space-y-3">
+                          <FileText className="w-12 h-12 mx-auto text-slate-400" />
+                          <p className="text-sm font-bold text-slate-700">Pratinjau langsung tidak tersedia untuk format file ini.</p>
+                          <button type="button" onClick={() => handleDownloadDoc(previewDoc)} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl inline-flex items-center cursor-pointer"><Download className="w-4 h-4 mr-1.5" /> Unduh File</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           );
         };
@@ -4643,59 +5272,86 @@
         const GlobalDocumentBackupView = ({ user, userRole }) => {
           const [documents, setDocuments] = useState([]);
           const [isLoading, setIsLoading] = useState(true);
+          const [isRestoring, setIsRestoring] = useState(false);
           const restoreInputRef = useRef(null);
           const [notification, setNotification] = useState({ show: false, message: '', type: 'info' });
 
           useEffect(() => {
             if (!userRole) return;
+            let isMounted = true;
             setIsLoading(true);
+            cleanupLegacyDocLocalStorage();
+
+            (async () => {
+              const cached = await sjaDocCache.get('sja_all_docs');
+              if (isMounted && Array.isArray(cached) && cached.length > 0) {
+                setDocuments(prev => prev.length > 0 ? prev : cached);
+              }
+            })();
+
+            let unsubscribe = () => {};
             try {
-                const docsRef = collection(db, 'artifacts', safeAppId, 'public', 'data', 'documents');
-                const unsubscribe = onSnapshot(docsRef, (snapshot) => {
-                  const fetchedData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-                  setDocuments(fetchedData); 
-                  localStorage.setItem('sja_all_docs', JSON.stringify(fetchedData));
-                  setIsLoading(false);
-                }, (err) => {
-                  const local = localStorage.getItem('sja_all_docs');
-                  if (local) setDocuments(JSON.parse(local));
-                  setIsLoading(false);
-                });
-                return () => unsubscribe();
-            } catch(e) {
-                const local = localStorage.getItem('sja_all_docs');
-                if (local) setDocuments(JSON.parse(local));
+              const docsRef = collection(db, 'artifacts', safeAppId, 'public', 'data', 'documents');
+              unsubscribe = onSnapshot(docsRef, (snapshot) => {
+                if (!isMounted) return;
+                try {
+                  const rawDocs = snapshot.docs.map(d => ({ ...d.data(), id: d.id }));
+                  const fetchedData = reassembleFirestoreDocuments(rawDocs);
+                  setDocuments(fetchedData);
+                  sjaDocCache.set('sja_all_docs', fetchedData);
+                } catch (e) {}
                 setIsLoading(false);
+              }, async () => {
+                const cached = await sjaDocCache.get('sja_all_docs');
+                if (isMounted && Array.isArray(cached)) setDocuments(cached);
+                if (isMounted) setIsLoading(false);
+              });
+            } catch (e) {
+              (async () => {
+                const cached = await sjaDocCache.get('sja_all_docs');
+                if (isMounted && Array.isArray(cached)) setDocuments(cached);
+                if (isMounted) setIsLoading(false);
+              })();
             }
+            return () => {
+              isMounted = false;
+              try { unsubscribe(); } catch (e) {}
+            };
           }, [userRole]);
 
-          const showNotification = (message, type = 'success') => { setNotification({ show: true, message, type }); setTimeout(() => setNotification({ show: false, message: '', type: 'info' }), 4000); };
+          const showNotification = (message, type = 'success') => { setNotification({ show: true, message, type }); setTimeout(() => setNotification({ show: false, message: '', type: 'info' }), 4500); };
 
           const handleBackup = () => {
               if (documents.length === 0) return showNotification("Tidak ada dokumen untuk dibackup.", "error");
-              const url = URL.createObjectURL(new Blob([JSON.stringify(documents, null, 2)], { type: 'application/json' }));
+              const cleanExport = documents.map(({ _chunkIds, ...rest }) => rest);
+              const url = URL.createObjectURL(new Blob([JSON.stringify(cleanExport, null, 2)], { type: 'application/json' }));
               const link = document.createElement('a'); link.href = url; link.download = `Backup_Dokumen_Legal_${new Date().toISOString().split('T')[0]}.json`;
               document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url);
               showNotification("Semua dokumen berhasil diekspor.", "success");
           };
 
           const handleRestoreFileChange = (e) => {
-              const file = e.target.files[0]; if (!file) return;
+              const file = e.target.files?.[0]; if (!file) return;
               const reader = new FileReader();
               reader.onload = async (event) => {
+                  setIsRestoring(true);
                   try {
                       const importedData = JSON.parse(event.target.result);
                       if (Array.isArray(importedData)) {
-                          setDocuments(importedData);
-                          localStorage.setItem('sja_all_docs', JSON.stringify(importedData));
-                          for (const d of importedData) {
-                              try { await setDoc(doc(db, 'artifacts', safeAppId, 'public', 'data', 'documents', d.id.toString()), d); } catch(e) {}
+                          const validDocs = importedData.filter(d => d && d.id && d.docType && d.docType !== '__chunk__');
+                          setDocuments(validDocs);
+                          await sjaDocCache.set('sja_all_docs', validDocs);
+                          for (const d of validDocs) {
+                              try { await saveDocumentToFirestore(d); } catch (err) {}
                           }
-                          showNotification(`Berhasil memulihkan ${importedData.length} dokumen.`, "success");
+                          showNotification(`Berhasil memulihkan ${validDocs.length} dokumen.`, "success");
                       } else showNotification("Format JSON tidak sesuai.", "error");
-                  } catch (error) { showNotification("Kesalahan membaca file.", "error"); }
+                  } catch (error) { showNotification("Kesalahan membaca file JSON.", "error"); }
+                  finally { setIsRestoring(false); }
               };
-              reader.readAsText(file); e.target.value = '';
+              reader.onerror = () => showNotification("Gagal membaca file backup.", "error");
+              reader.readAsText(file);
+              e.target.value = '';
           };
 
           return (
@@ -4705,9 +5361,9 @@
                  <h1 className="text-2xl font-bold text-slate-800 tracking-tight mb-2">Backup & Restore Dokumen</h1>
                  <p className="text-slate-500 text-sm mb-8 max-w-lg mx-auto leading-relaxed">Pusat pencadangan dan pemulihan tersentralisasi untuk semua data Dokumen Legal.</p>
                  <div className="flex flex-col sm:flex-row justify-center gap-4">
-                     <button onClick={handleBackup} type="button" className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 hover:text-blue-600 transition-colors shadow-sm font-bold text-sm flex items-center justify-center"><Download className="w-5 h-5 mr-2" /> Backup Data</button>
+                     <button onClick={handleBackup} type="button" className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 hover:text-blue-600 transition-colors shadow-sm font-bold text-sm flex items-center justify-center cursor-pointer"><Download className="w-5 h-5 mr-2" /> Backup Data</button>
                      {userRole === 'admin' && (
-                         <><button onClick={() => restoreInputRef.current?.click()} type="button" className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 hover:text-blue-600 transition-colors shadow-sm font-bold text-sm flex items-center justify-center"><Upload className="w-5 h-5 mr-2" /> Restore Data</button><input type="file" ref={restoreInputRef} onChange={handleRestoreFileChange} className="hidden" accept=".json" /></>
+                         <><button disabled={isRestoring} onClick={() => restoreInputRef.current?.click()} type="button" className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl hover:bg-slate-50 hover:text-blue-600 disabled:opacity-60 transition-colors shadow-sm font-bold text-sm flex items-center justify-center cursor-pointer">{isRestoring ? <Loader2 className="w-5 h-5 mr-2 animate-spin" /> : <Upload className="w-5 h-5 mr-2" />} {isRestoring ? 'Memulihkan...' : 'Restore Data'}</button><input type="file" ref={restoreInputRef} onChange={handleRestoreFileChange} className="hidden" accept=".json" /></>
                      )}
                  </div>
                  {notification.show && <div className={`mt-6 p-4 rounded-xl inline-flex items-center shadow-sm border animate-in fade-in ${notification.type === 'success' ? 'bg-emerald-50 text-emerald-800 border-emerald-100' : 'bg-rose-50 text-rose-800 border-rose-100'}`}><span className="font-semibold text-sm">{notification.message}</span></div>}
@@ -4829,18 +5485,20 @@
 
           useEffect(() => {
             // Cek cache lokal agar logo instan tampil
-            const localLogo = localStorage.getItem('sja_app_logo');
-            if (localLogo) setAppLogo(localLogo);
+            try {
+              const localLogo = localStorage.getItem('sja_app_logo');
+              if (localLogo) setAppLogo(localLogo);
+            } catch (e) {}
 
             // Dengarkan Firebase untuk Logo secara global (tanpa syarat userRole)
             const logoRef = doc(db, 'artifacts', safeAppId, 'public', 'data', 'settings', 'logo');
             const unsubscribeLogo = onSnapshot(logoRef, (docSnap) => { 
                 if (docSnap.exists() && docSnap.data().imageUrl) {
                     setAppLogo(docSnap.data().imageUrl); 
-                    localStorage.setItem('sja_app_logo', docSnap.data().imageUrl);
+                    try { localStorage.setItem('sja_app_logo', docSnap.data().imageUrl); } catch (e) {}
                 } else { 
                     setAppLogo(null); 
-                    localStorage.removeItem('sja_app_logo');
+                    try { localStorage.removeItem('sja_app_logo'); } catch (e) {}
                 }
             }, () => {});
             return () => unsubscribeLogo();
@@ -4862,18 +5520,22 @@
                      return dateB - dateA;
                   });
                   setData(fetchedData);
-                  localStorage.setItem('sja_procurement_data', JSON.stringify(fetchedData));
+                  try { localStorage.setItem('sja_procurement_data', JSON.stringify(fetchedData)); } catch (e) {}
                   setIsLoadingData(false);
                 }, (err) => {
                   console.warn("Cloud error (menggunakan data lokal):", err.message);
-                  const localData = localStorage.getItem('sja_procurement_data');
-                  if (localData) setData(JSON.parse(localData));
+                  try {
+                    const localData = localStorage.getItem('sja_procurement_data');
+                    if (localData) setData(JSON.parse(localData));
+                  } catch (e) {}
                   setIsLoadingData(false);
                 });
                 return () => unsubscribe();
             } catch (e) {
-                const localData = localStorage.getItem('sja_procurement_data');
-                if (localData) setData(JSON.parse(localData));
+                try {
+                  const localData = localStorage.getItem('sja_procurement_data');
+                  if (localData) setData(JSON.parse(localData));
+                } catch (err) {}
                 setIsLoadingData(false);
             }
           }, [user, userRole]);
@@ -5257,7 +5919,6 @@
                     {userRole === 'admin' && (
                       <div className="pt-2 border-t border-[#1e293b] mt-2 space-y-1.5">
                         <span className="px-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest block mb-2 mt-2">Tools & Sistem Terkait</span>
-                        <button onClick={() => window.location.href = '/sibikom'} className={navItemClass(false)}><Coffee className="w-4 h-4 mr-3 opacity-80 text-amber-400" /> SIBIKOM (Biji Kopi)</button>
                         <button onClick={() => window.open('https://gemini.google.com/share/5c6cfda5125a', '_blank')} className={navItemClass(false)}><ClipboardList className="w-4 h-4 mr-3 opacity-80" /> Kontrak Vendor</button>
                         <div>
                           <button onClick={() => setIsMonitoringOpen(!isMonitoringOpen)} className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-colors text-[13px] font-bold tracking-wide hover:bg-[#1e293b] text-slate-300`}>
@@ -5341,8 +6002,6 @@
                       <button onClick={() => { window.open('https://procurementsja3.github.io/spp-monitoring-sja/', '_blank'); }} className={navItemClass(false)}><CheckCircle2 className="w-4 h-4 mr-3" /> Realisasi SPP</button>
                       {userRole === 'admin' && (
                         <>
-                          <span className="px-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest block mb-2 mt-4">Tools & Sistem Terkait</span>
-                          <button onClick={() => window.location.href = '/sibikom.html'} className={navItemClass(false)}><Coffee className="w-4 h-4 mr-3 opacity-80 text-amber-400" /> SIBIKOM (Biji Kopi)</button>
                           <span className="px-4 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest block mb-2 mt-4">Monitoring Sistem</span>
                           <button onClick={() => { window.open('https://gemini.google.com/share/9ef62681fb8c?skid=ac242023-3f8b-433a-a599-e91fc708e58d', '_blank'); }} className={navItemClass(false)}><Droplet className="w-4 h-4 mr-3" /> Solar</button>
                           <button onClick={() => { window.open('https://procurementsja3.github.io/Aplikasi-Stock-Palet-Kayu-Export-New-/', '_blank'); }} className={navItemClass(false)}><Package className="w-4 h-4 mr-3" /> Pallet Kayu</button>
